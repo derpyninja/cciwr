@@ -1,0 +1,257 @@
+---
+title: "CCIWR main analysis"
+author: "Felix Zaussinger and Johann Schuur"
+date: "02.06.2020"
+output: 
+  bookdown::html_document2:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE, results='hide'}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE, results='asis')
+options(digits=4)
+
+knitr::opts_chunk$set()
+
+# remove all objects from R workspace
+rm(list=ls())
+
+# Load necessary packages
+library(broom)
+library(estimatr)
+library(gsynth)
+library(haven)
+library(MASS)
+library(texreg)
+library(margins)
+library(tidyverse)
+library(pander)
+library(bookdown)
+library(sandwich)
+library(ggeffects)
+library(AER)
+library(reshape2)
+library(corrplot)
+library(readxl) # read xls and xlsx files
+library(tidyr)
+library(ncdf4)
+library(chron)
+
+# set plotting theme
+theme_set(theme_classic())
+
+# set working directory (Felix)
+setwd("~/ETH/code/cciwr")
+
+# set working directory (Johann)
+#setwd("~/cciwr/")
+```
+
+```{r, include=FALSE}
+# Note:
+# ------
+# Figures are referenced by simply referring to the name of the code block: _(figure \@ref(fig:A))_.
+# Figure panels can be created by adding _..., fig.show = 'hold', out.width = '50%'_ to the curly brackets of the code block.
+# Example: {r blockname, fig.cap="figure capture", fig.show = 'hold', out.width = '50%'}
+
+# output table
+#htmlreg(list(m1, m2), 
+#        custom.model.names = c('m1', 'm2),
+#        caption="", label="tab:", center = FALSE, star.symbol = "\\*")
+```
+
+
+## Data {-}
+Monte Carlo simulation data
+```{r}
+df <- read.csv(file="data/monte_carlo/")
+```
+
+Read GRUN data
+```{r}
+# open netCDF file
+grun <- nc_open("./data/GRUN/GRUN_discharge_cropped_small_tigris.nc")
+
+lat <- ncvar_get(grun, "X")
+lon <- ncvar_get(grun, "Y")
+time <- ncvar_get(grun, "time")
+tunits <- ncatt_get(grun,"time","units")
+runoff <- ncvar_get(grun, "Runoff") # mm/day
+
+# convert time -- split the time units string into fields
+from <- strsplit(tunits$value, " ")
+tstamps <- as.Date(time, origin=unlist(from)[3])
+
+# mosul time series location
+# Mosul: lat = 36.32, lon = 43.15
+# Bagdad: lat = 33.30, lon = 44.38
+
+read_grun <- function(lat_point, lon_point) {
+  lat_idx <- which.min(abs(lat - lat_point)) # X
+  lon_idx <- which.min(abs(lon - lon_point)) # Y
+  grun_data <- (runoff[lat_idx, lon_idx,])
+  df_grun <- data.frame(date = tstamps, runoff = grun_data)
+  return(df_grun)
+}
+
+# combine to data frame
+df_grun <- read_grun(36.32, 43.15)
+
+# grun_ilisu
+grun_ilisu <- read_grun(37.530112, 41.851024)
+
+merged = data.frame(date=tstamps, mosul = df_grun$runoff, ilisu = grun_ilisu$runoff)
+write.csv(merged, "grun_data.csv")
+
+```
+
+Read Dahiti altimetry data
+```{r}
+# read csv file
+dahiti <- read.table("./data/Dahiti_dgfi_tum_altimetry/dahiti.dgfi.tum.de.txt")
+
+# open netCDF file
+dahiti_nc <- nc_open("./data/Dahiti_dgfi_tum_altimetry/118_water_level_altimetry.nc")
+```
+
+Summary
+```{r}
+besiri <- as.data.frame(tidy(summary(station_data_besiri$discharge_obs)))
+mosul <- as.data.frame(tidy(summary(station_data_mosul$discharge_obs))[,1:6])
+bagdad <- as.data.frame(tidy(summary(station_data_bagdad$discharge_obs))[,1:6])
+
+row.names(besiri) <- "Besiri"
+row.names(mosul) <- "Mosul"
+row.names(bagdad) <- "Bagdad"
+
+rbind(besiri, mosul, bagdad)
+```
+
+Time series plot
+```{r fig.width=10, fig.height=5}
+# Discharge plot
+ggplot() + 
+  geom_line(aes(x=date, y=discharge_obs, color="Besiri"), data = station_data_besiri) + 
+  geom_line(aes(x=date, y=discharge_obs, color="Mosul"), data = station_data_mosul) + 
+  geom_line(aes(x=date, y=discharge_obs, color="Bagdad"), data = station_data_bagdad) +
+  labs(title="GRDC discharge", y="Discharge (m^3/s)")
+```
+
+normalise with z-score
+```{r}
+df_grun$runoff_norm <- (df_grun$runoff - mean(df_grun$runoff, na.rm = TRUE)) / sd(df_grun$runoff, na.rm = TRUE)
+
+station_data_besiri$discharge_obs_norm <- (station_data_besiri$discharge_obs - mean(station_data_besiri$discharge_obs, na.rm = TRUE)) / sd(station_data_besiri$discharge_obs, na.rm = TRUE)
+
+station_data_mosul$discharge_obs_norm <- (station_data_mosul$discharge_obs - mean(station_data_mosul$discharge_obs, na.rm = TRUE)) / sd(station_data_mosul$discharge_obs, na.rm = TRUE)
+
+station_data_bagdad$discharge_obs_norm <- (station_data_bagdad$discharge_obs - mean(station_data_bagdad$discharge_obs, na.rm = TRUE)) / sd(station_data_bagdad$discharge_obs, na.rm = TRUE)
+```
+
+GRUN runoff in mm/day
+```{r fig.width=10, fig.height=5}
+ggplot() +
+  geom_line(aes(x=date, y=runoff_norm, color="GRUN at Mosul"), data = df_grun) + 
+  geom_line(aes(x=date, y=discharge_obs_norm, color="Besiri"), data = station_data_besiri) + 
+  geom_line(aes(x=date, y=discharge_obs_norm, color="Mosul"), data = station_data_mosul) +
+  geom_line(aes(x=date, y=discharge_obs_norm, color="Bagdad"), data = station_data_bagdad) + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  labs(title="Normalised discharge (z-scored)", y="sd")
+```
+
+TUM Dahiti water level data Mosul dam in m
+```{r}
+# Altimetry time series plot
+dahiti$V1 <- as.Date(dahiti$V1, '%Y-%m-%d')
+
+ggplot() +
+  geom_line(aes(x = V1, y = V2, colour = "Mosul dam"), data = dahiti) +
+  # add minimal water level required in Mosul dam
+  #geom_hline(yintercept = 300, linetype = "dashed") +
+  geom_vline(xintercept = as.numeric(as.Date("2019-06-01")), linetype = "dashed") +
+  labs(x = "Date", y = "Water level", title = "Altimetry of the Mosul dam between 1992 and present")
+```
+
+Violinplot
+```{r}
+ggplot() + 
+  geom_violin(aes(x='Besiri', y=discharge_obs_norm, color="Besiri"), data = station_data_besiri) + 
+  geom_violin(aes(x='Mosul', y=discharge_obs_norm, color="Mosul"), data = station_data_mosul) + 
+  geom_violin(aes(x='Bagdad', y=discharge_obs_norm, color="Bagdad"), data = station_data_bagdad) + 
+  geom_violin(aes(x='GRUN Bagdad', y=runoff, color="GRUN Bagdad"), data = df_grun) + 
+  labs(title="GRDC discharge", y="Discharge (m^3/s)")
+  #geom_line(aes(x=date, y=discharge_obs, color="Besiri"), data = station_data_besiri) + 
+  #geom_line(aes(x=date, y=discharge_obs, color="Mosul"), data = station_data_mosul) + 
+  #geom_line(aes(x=date, y=discharge_obs, color="Bagdad"), data = station_data_bagdad) +
+```
+
+Correlation p(GRUN at bagdad, station at bagdad)
+```{r}
+df_merged <- merge(df_grun, station_data_mosul, by="date")
+
+tidy(cor.test(df_merged$runoff_norm, df_merged$discharge_obs_norm))
+```
+
+corr altimetry 
+```{r}
+altimetry_mosul <- data.frame(date=dahiti$V1, water_level = dahiti$V2)
+
+df_merged2 <- merge(df_grun, altimetry_mosul, by="date")
+
+tidy(cor.test(df_merged2$runoff, df_merged2$water_level))
+```
+
+Based on an article is likely that the filling of Ilisu started June 10th. Source: https://www.reuters.com/article/us-turkey-dam-erdogan-idUSKCN1QO1V5
+```{r}
+ols <- lm(runoff ~ water_level, df_merged2)
+tidy(summary(ols))
+
+beta0 = as.numeric(coef(ols)[1])
+beta1 = as.numeric(coef(ols)[2])
+
+altimetry_mosul$discharge_prediction <- beta0 + beta1 * altimetry_mosul$water_level
+
+ggplot() +
+  geom_line(aes(x = date, y = discharge_prediction, colour = "Mosul dam"), data = altimetry_mosul) +
+  # add minimal water level required in Mosul dam
+  #geom_hline(yintercept = 300, linetype = "dashed") +
+  geom_vline(xintercept = as.numeric(as.Date("2019-06-10")), linetype = "dashed") +
+  labs(x = "Date", y = "Discharge (mm/day)", title = "Approximate runoff based on regression with altimetry data")
+```
+
+repeat for ilisu
+```{r}
+df_merged_ilisu <- merge(grun_ilisu, altimetry_mosul, by="date")
+tidy(cor.test(df_merged_ilisu$runoff, df_merged_ilisu$water_level))
+
+ols_ilisu <- lm(runoff ~ water_level, df_merged_ilisu)
+tidy(summary(ols_ilisu))
+
+beta0 = as.numeric(coef(ols_ilisu)[1])
+beta1 = as.numeric(coef(ols_ilisu)[2])
+
+altimetry_mosul$discharge_prediction_ilisu <- beta0 + beta1 * altimetry_mosul$water_level
+
+```
+
+plot resulting ts for ilisu and mosul
+
+```{r}
+ggplot() +
+  geom_line(aes(x = date, y = runoff, colour = "GRUN Ilisu"), data = grun_ilisu %>% filter(date > 2000)) +
+  geom_line(aes(x = date, y = discharge_prediction, colour = "Mosul dam"), data = altimetry_mosul) +
+  geom_line(aes(x = date, y = discharge_prediction_ilisu, colour = "Ilisu dam"), data = altimetry_mosul) +
+  
+  # add minimal water level required in Mosul dam
+  #geom_hline(yintercept = 300, linetype = "dashed") +
+  geom_vline(xintercept = as.numeric(as.Date("2019-06-10")), linetype = "dashed") +
+  labs(x = "Date", y = "Discharge (mm/day)", title = "Approximate runoff based on regression with altimetry data")
+```
+```{r}
+grun_ilisu
+```
+
